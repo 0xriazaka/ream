@@ -12,7 +12,7 @@ use ream_beacon_api_types::{
     responses::BeaconResponse,
 };
 use ream_bls::PubKey;
-use ream_consensus::validator::Validator;
+use ream_consensus::{validator::Validator, electra::beacon_state::BeaconState, constants::SLOTS_PER_EPOCH};
 use ream_storage::db::ReamDB;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -374,4 +374,84 @@ pub async fn post_validator_balances_from_state(
             body.id.as_ref(),
         ))),
     )
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidatorLivenessData {  
+    #[serde(with = "serde_utils::quoted_u64")]  
+    pub index: u64,  
+    pub is_live: bool,  
+}
+
+impl ValidatorLivenessData {  
+    pub fn new(index: u64, is_live: bool) -> Self {  
+        Self { index, is_live }  
+    }  
+}  
+
+#[post("/validator/liveness/{epoch}")]  
+pub async fn post_validator_liveness(  
+    db: Data<ReamDB>,  
+    epoch: Path<u64>,  
+    validator_ids: Json<Vec<ValidatorID>>,  
+) -> Result<impl Responder, ApiError> {  
+    let epoch = epoch.into_inner();  
+    let validator_ids = validator_ids.into_inner();  
+      
+    let slot = epoch * SLOTS_PER_EPOCH;  
+    let state = get_state_from_id(ID::Slot(slot), &db).await?;  
+      
+    let mut liveness_data = Vec::new();  
+      
+    for validator_id in validator_ids {  
+        let (index, _validator) = match validator_id {  
+            ValidatorID::Index(i) => {  
+                match state.validators.get(i as usize) {  
+                    Some(validator) => (i as usize, validator),  
+                    None => continue,  
+                }  
+            },  
+            ValidatorID::Address(pubkey) => {  
+                match state.validators.iter().enumerate()  
+                    .find(|(_, v)| v.pubkey == pubkey) {  
+                    Some((i, validator)) => (i, validator),  
+                    None => continue,  
+                }  
+            }  
+        };  
+          
+        let is_live = check_validator_participation(&state, index, epoch)?;  
+          
+        liveness_data.push(ValidatorLivenessData::new(  
+            index as u64,  
+            is_live,  
+        ));  
+    }  
+      
+    Ok(HttpResponse::Ok().json(BeaconResponse::new(liveness_data)))  
+}  
+
+fn check_validator_participation(state: &BeaconState, validator_index: usize, epoch: u64) -> Result<bool, ApiError> {  
+    let validator = &state.validators[validator_index];  
+    if !validator.is_active_validator(epoch) {  
+        return Ok(false);  
+    }  
+      
+    let current_epoch = state.get_current_epoch();  
+      
+    if epoch == current_epoch {  
+        if let Some(participation) = state.current_epoch_participation.get(validator_index) {  
+            Ok(*participation > 0)  
+        } else {  
+            Ok(false)  
+        }  
+    } else if epoch == current_epoch - 1 {  
+        if let Some(participation) = state.previous_epoch_participation.get(validator_index) {  
+            Ok(*participation > 0)  
+        } else {  
+            Ok(false)  
+        }  
+    } else {  
+        Ok(validator.is_active_validator(epoch))  
+    }  
 }
