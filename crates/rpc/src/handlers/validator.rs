@@ -389,47 +389,39 @@ impl ValidatorLivenessData {
     }  
 }  
 
-#[post("/validator/liveness/{epoch}")]  
-pub async fn post_validator_liveness(  
-    db: Data<ReamDB>,  
-    epoch: Path<u64>,  
-    validator_ids: Json<Vec<ValidatorID>>,  
-) -> Result<impl Responder, ApiError> {  
-    let epoch = epoch.into_inner();  
-    let validator_ids = validator_ids.into_inner();  
-      
-    let slot = epoch * SLOTS_PER_EPOCH;  
-    let state = get_state_from_id(ID::Slot(slot), &db).await?;  
-      
-    let mut liveness_data = Vec::new();  
-      
-    for validator_id in validator_ids {  
-        let (index, _validator) = match validator_id {  
-            ValidatorID::Index(i) => {  
-                match state.validators.get(i as usize) {  
-                    Some(validator) => (i as usize, validator),  
-                    None => continue,  
-                }  
-            },  
-            ValidatorID::Address(pubkey) => {  
-                match state.validators.iter().enumerate()  
-                    .find(|(_, v)| v.pubkey == pubkey) {  
-                    Some((i, validator)) => (i, validator),  
-                    None => continue,  
-                }  
-            }  
-        };  
+#[post("/validator/liveness/{epoch}")]    
+pub async fn post_validator_liveness(    
+    db: Data<ReamDB>,    
+    epoch: Path<u64>,    
+    validator_indices: Json<Vec<String>>,    
+) -> Result<impl Responder, ApiError> {    
+    let epoch = epoch.into_inner();    
+    let validator_indices = validator_indices.into_inner();    
+        
+    let slot = epoch * SLOTS_PER_EPOCH;    
+    let state = get_state_from_id(ID::Slot(slot), &db).await?;    
+        
+    let mut liveness_data = Vec::new();    
+        
+    for validator_index_str in validator_indices {    
+        let validator_index: u64 = validator_index_str.parse()  
+            .map_err(|_| ApiError::BadRequest("Invalid validator index".to_string()))?;  
+        let index = validator_index as usize;    
           
-        let is_live = check_validator_participation(&state, index, epoch)?;  
-          
-        liveness_data.push(ValidatorLivenessData::new(  
-            index as u64,  
-            is_live,  
-        ));  
+        match state.validators.get(index) {    
+            Some(_validator) => {    
+                let is_live = check_validator_participation(&state, index, epoch)?;    
+                liveness_data.push(ValidatorLivenessData::new(    
+                    validator_index,    
+                    is_live,    
+                ));    
+            },    
+            None => continue,  
+        }    
     }  
-      
-    Ok(HttpResponse::Ok().json(BeaconResponse::new(liveness_data)))  
-}  
+        
+    Ok(HttpResponse::Ok().json(BeaconResponse::new(liveness_data)))    
+}
 
 fn check_validator_participation(state: &BeaconState, validator_index: usize, epoch: u64) -> Result<bool, ApiError> {  
     let validator = &state.validators[validator_index];  
